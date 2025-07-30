@@ -180,7 +180,7 @@ def process_signal(signal):
 
     print(f"[INFO] MTGL Enabled: {mtgl_enabled}, MTGL Level: {mtgl_level}, MTGL Increment: {mtgl_increment_percent}%")
 
-    # Prepare trade details
+    # Prepare trade details for the first trade
     trade = {
         "asset": pair,
         "order_id": "PENDING",
@@ -189,12 +189,13 @@ def process_signal(signal):
         "open_time": "",
         "close_time": "",
         "result": "WAITING",
-        "mtgl": 0,  # Initial MTGL level
+        "mtgl": 0,  # Initialize MTGL level as 0 for the first trade
         "close_dt": None,
         "channel_id": channel_id,
         "mtgl_config": mtgl_config
     }
 
+    # Append this initial trade to the trade history
     with trade_lock:
         trade_history.append(trade)
         trade_idx = len(trade_history) - 1
@@ -261,9 +262,13 @@ def process_signal(signal):
                 time.sleep(1)
             else:
                 profit, status = api.check_win(order_id)
+                # Normalize status to uppercase to ensure comparison is case insensitive
+                status = status.upper() if status else "UNKNOWN"
                 with trade_lock:
-                    trade_history[trade_idx]["result"] = status.upper() if status else "UNKNOWN"
+                    trade_history[trade_idx]["result"] = status
                     trade_history[trade_idx]["close_time"] = datetime.now().strftime('%H:%M:%S')
+
+                print(f"[DEBUG] Trade result status: {status}")
 
                 if status == "WIN":
                     print(f"[INFO] {pair} WON!")
@@ -276,39 +281,53 @@ def process_signal(signal):
                     # Log the signal details AFTER the trade closes and results in "LOOSE"
                     channel_name = mtgl_config.get('name', 'Unknown Channel')
                     print(f"[INFO] Trade result: LOOSE. Ending attempt. "
-                          f"Signal received from Channel: {channel_name} | Symbol: {pair} | "
-                          f"Direction: {direction.upper()} | Expiry: {expiry} sec")
+                        f"Signal received from Channel: {channel_name} | Symbol: {pair} | "
+                        f"Direction: {direction.upper()} | Expiry: {expiry} sec")
 
                     print(f"[INFO] MTGL Enabled: {mtgl_enabled}. Retrying with increased amount...")
 
-                    if mtgl_enabled:
+                    # Debugging check
+                    print(f"[DEBUG] MTGL Enabled: {mtgl_enabled}, Current MTGL attempts: {mtgl_attempts}, Max MTGL retries: {max_mtgl_retries}")
+
+                    if mtgl_enabled and mtgl_attempts < max_mtgl_retries:
                         print(f"[INFO] MTGL is enabled for this channel. Proceeding with MTGL retries.")
                         mtgl_attempts += 1
                         current_amount += current_amount * (mtgl_increment_percent / 100)  # Increase amount after loss
                         print(f"[DEBUG] MTGL attempt: {mtgl_attempts}, Current trade amount: {current_amount:.2f}")
-
-                        # Update MTGL level after loss
+                    
+                        # Append a new row for MTGL retry
                         with trade_lock:
-                            trade_history[trade_idx]["mtgl"] = mtgl_attempts
+                            trade_history.append({
+                                "asset": pair,
+                                "order_id": "PENDING",  # This order is still pending
+                                "expiration": f"{expiry} Sec" if expiry < 60 else f"{expiry // 60} Min" if expiry < 3600 else f"{expiry // 3600} Hr",
+                                "position": direction.upper(),
+                                "open_time": "",
+                                "close_time": "",
+                                "result": "WAITING",
+                                "mtgl": mtgl_attempts,
+                                "close_dt": None,
+                                "channel_id": channel_id,
+                                "mtgl_config": mtgl_config
+                            })
+                        new_trade_idx = len(trade_history) - 1
 
-                        # Place the trade again immediately after loss if MTGL is enabled
-                        order_id = place_trade(pair, direction, expiry, current_amount)  # Pass pair, direction, expiry, and updated amount
+                        # Place the new trade for MTGL retry
+                        # order_id = place_trade(pair, direction, expiry, current_amount)  # Pass pair, direction, expiry, and updated amount
                         if not order_id:
                             print(f"[ERROR] Failed to place new order for {pair} after MTGL attempt.")
                             with trade_lock:
-                                trade_history[trade_idx]["result"] = "FAILED"
+                                trade_history[new_trade_idx]["result"] = "FAILED"
                             return True  # Stop after failure to place the order
                         return False  # Continue retry loop
 
                     else:
-                        print(f"[INFO] MTGL not enabled, not retrying the trade.")
-                        return True  # No MTGL enabled, stop retrying the trade
-
+                        print(f"[INFO] MTGL not enabled or max retries reached, not retrying the trade.")
+                        return True  # No MTGL enabled or max retries reached
 
                 else:
                     print(f"[INFO] Trade result: {status}. Ending attempt.")
                     return True  # Unknown or draw, end loop
-
 
     # Execute the trade logic
     while mtgl_attempts < max_mtgl_retries:
